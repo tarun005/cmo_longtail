@@ -11,6 +11,7 @@ import torchvision.datasets as datasets
 import models
 from tensorboardX import SummaryWriter
 from imbalance_data.imbalance_cifar import IMBALANCECIFAR100
+from imbalance_data.dnet_loader import BaseLoader
 from losses import LDAMLoss, BalancedSoftmaxLoss
 from opts import parser
 import warnings
@@ -20,13 +21,15 @@ import util.moco_loader as moco_loader
 
 
 best_acc1 = 0
+is_best = 0
 
 def main():
     args = parser.parse_args()
-    args.store_name = '_'.join(
-        [args.dataset, args.arch, args.loss_type, args.train_rule, args.data_aug, str(args.imb_factor),
-         str(args.rand_number),
-         str(args.mixup_prob), args.exp_str])
+    # args.store_name = '_'.join(
+    #     [args.dataset, args.arch, args.loss_type, args.train_rule, args.data_aug, str(args.imb_factor_src),
+    #      str(args.rand_number),
+    #      str(args.mixup_prob), args.exp_str])
+    # import pdb; pdb.set_trace()
     prepare_folders(args)
 
     if args.seed is not None:
@@ -147,33 +150,61 @@ def main_worker(gpu, ngpus_per_node, args):
 
     print(args)
 
-    train_dataset = IMBALANCECIFAR100(root=args.root, imb_factor=args.imb_factor,
-                                      rand_number=args.rand_number, weighted_alpha=args.weighted_alpha, train=True, download=True,
-                                      transform=transform_train, use_randaug=args.use_randaug)
-    val_dataset = datasets.CIFAR100(root=args.root, train=False, download=True, transform=transform_val)
+    # train_dataset = IMBALANCECIFAR100(root=args.root, imb_factor=args.imb_factor,
+    #                                   rand_number=args.rand_number, weighted_alpha=args.weighted_alpha, train=True, download=True,
+    #                                   transform=transform_train, use_randaug=args.use_randaug)
+    # val_dataset = datasets.CIFAR100(root=args.root, train=False, download=True, transform=transform_val)
 
-    cls_num_list = train_dataset.get_cls_num_list()
+    source, target = args.source, args.target
+
+    ## source and target - train
+    train_dataset_source = BaseLoader(root=args.root, txt=source, transform=transform_train, use_randaug=args.use_randaug, weighted_alpha=args.weighted_alpha, imb_factor=args.imb_factor_src, cls_num=args.n_classes)
+
+    train_dataset_target = BaseLoader(root=args.root, txt=target, transform=transform_train, use_randaug=args.use_randaug, weighted_alpha=args.weighted_alpha, imb_factor=args.imb_factor_tgt, cls_num=args.n_classes)
+
+    if args.dataset == "DomainNet":
+        source = source.replace("train" , "test")
+        target = source.replace("train" , "test")
+    
+    ## source and target - val
+    val_dataset_source = BaseLoader(root=args.root, txt=source, transform=transform_val, cls_num=args.n_classes)
+
+    val_dataset_target = BaseLoader(root=args.root, txt=target, transform=transform_val, cls_num=args.n_classes)
+
+
+    cls_num_list = train_dataset_source.get_cls_num_list()
     print('cls num list:')
     print(cls_num_list)
     args.cls_num_list = cls_num_list
     train_cls_num_list = np.array(cls_num_list)
 
-    train_sampler = None
+    if args.CBS:
+        train_sampler = BalancedSampler(train_dataset_source)
+    else:
+        train_sampler = None
 
-    train_loader = torch.utils.data.DataLoader(
-            train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
+    train_loader_source = torch.utils.data.DataLoader(
+            train_dataset_source, batch_size=args.batch_size, shuffle=(train_sampler is None),
             num_workers=args.workers, pin_memory=True, sampler=train_sampler)
 
-    val_loader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=args.batch_size, shuffle=False,
+    val_loader_source = torch.utils.data.DataLoader(
+        val_dataset_source, batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=True)
     weighted_train_loader = None
     weighted_cls_num_list = [0] * num_classes
 
+    train_loader_target = torch.utils.data.DataLoader(
+            train_dataset_target, batch_size=args.batch_size, shuffle=True,
+            num_workers=args.workers, pin_memory=True, sampler=None)
+
+    val_loader_target = torch.utils.data.DataLoader(
+        val_dataset_target, batch_size=args.batch_size, shuffle=False,
+        num_workers=args.workers, pin_memory=True)
+
     if args.data_aug == 'CMO':
-        weighted_sampler = train_dataset.get_weighted_sampler()
+        weighted_sampler = train_dataset_source.get_weighted_sampler()
         weighted_train_loader = torch.utils.data.DataLoader(
-            train_dataset, batch_size=args.batch_size,
+            train_dataset_source, batch_size=args.batch_size,
             num_workers=args.workers, pin_memory=True, sampler=weighted_sampler)
 
     cls_num_list_cuda = torch.from_numpy(np.array(cls_num_list)).float().cuda()
@@ -188,6 +219,7 @@ def main_worker(gpu, ngpus_per_node, args):
     start_time = time.time()
     print("Training started!")
 
+    is_best = 0
     for epoch in range(args.start_epoch, args.epochs):
 
         if args.use_randaug:
@@ -228,21 +260,25 @@ def main_worker(gpu, ngpus_per_node, args):
             return
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, args, log_training,
+        batch_iterator = zip(loop_iterable(train_loader_source), loop_iterable(train_loader_target))
+        train(batch_iterator, model, criterion, optimizer, epoch, args, log_training,
               tf_writer, weighted_train_loader)
 
         # evaluate on validation set
-        acc1 = validate(val_loader, model, criterion, epoch, args, log_testing, tf_writer)
+        if (epoch + 1) % args.valid_freq == 0:
+            acc1_source = validate(val_loader_source, model, criterion, epoch, args, log_testing, tf_writer)
 
-        # remember best acc@1 and save checkpoint
-        is_best = acc1 > best_acc1
-        best_acc1 = max(acc1, best_acc1)
+            # acc1_target = validate(val_loader_target, model, criterion, epoch, args, log_testing, tf_writer)
 
-        tf_writer.add_scalar('acc/test_top1_best', best_acc1, epoch)
-        output_best = 'Best Prec@1: %.3f\n' % (best_acc1)
-        print(output_best)
-        log_testing.write(output_best + '\n')
-        log_testing.flush()
+            # remember best acc@1 and save checkpoint
+            is_best = acc1_source > best_acc1
+            best_acc1 = max(acc1_source, best_acc1)
+
+            tf_writer.add_scalar('acc/test_top1_best', best_acc1, epoch)
+            output_best = 'Best Prec@1: %.3f\n' % (best_acc1)
+            print(output_best)
+            log_testing.write(output_best + '\n')
+            log_testing.flush()
 
         save_checkpoint(args, {
             'epoch': epoch + 1,
@@ -279,46 +315,47 @@ def train(train_loader, model, criterion, optimizer, epoch, args, log,
     if args.data_aug == 'CMO' and args.start_data_aug < epoch < (args.epochs - args.end_data_aug):
         inverse_iter = iter(weighted_train_loader)
 
-    for i, (input, target) in enumerate(train_loader):
+    for i, (input_src, target_src, input_tgt, _) in enumerate(train_loader):
         if args.data_aug == 'CMO' and args.start_data_aug < epoch < (args.epochs - args.end_data_aug):
             try:
                 input2, target2 = next(inverse_iter)
             except:
                 inverse_iter = iter(weighted_train_loader)
                 input2, target2 = next(inverse_iter)
-            input2 = input2[:input.size()[0]]
-            target2 = target2[:target.size()[0]]
+            input2 = input2[:input_src.size()[0]]
+            target2 = target2[:target_src.size()[0]]
             input2 = input2.cuda(args.gpu, non_blocking=True)
             target2 = target2.cuda(args.gpu, non_blocking=True)
 
         # measure data loading time
         data_time.update(time.time() - end)
 
-        input = input.cuda(args.gpu, non_blocking=True)
-        target = target.cuda(args.gpu, non_blocking=True)
+        input_src = input_src.cuda(args.gpu, non_blocking=True)
+        target_src = target_src.cuda(args.gpu, non_blocking=True)
+        input_tgt = input_tgt.cuda(args.gpu, non_blocking=True)
         # Data augmentation
         r = np.random.rand(1)
 
         if args.data_aug == 'CMO' and args.start_data_aug < epoch < (args.epochs - args.end_data_aug) and r < args.mixup_prob:
             # generate mixed sample
             lam = np.random.beta(1, 1)
-            bbx1, bby1, bbx2, bby2 = rand_bbox(input.size(), lam)
-            input[:, :, bbx1:bbx2, bby1:bby2] = input2[:, :, bbx1:bbx2, bby1:bby2]
+            bbx1, bby1, bbx2, bby2 = rand_bbox(input_src.size(), lam)
+            input_src[:, :, bbx1:bbx2, bby1:bby2] = input2[:, :, bbx1:bbx2, bby1:bby2]
             # adjust lambda to exactly match pixel ratio
-            lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (input.size()[-1] * input.size()[-2]))
+            lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (input_src.size()[-1] * input_src.size()[-2]))
             # compute output
-            output = model(input)
-            loss = criterion(output, target) * lam + criterion(output, target2) * (1. - lam)
+            output = model(input_src)
+            loss = criterion(output, target_src) * lam + criterion(output, target2) * (1. - lam)
 
         else:
-            output = model(input)
-            loss = criterion(output, target)
+            output = model(input_src)
+            loss = criterion(output, target_src)
 
         # measure accuracy and record loss
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
-        losses.update(loss.item(), input.size(0))
-        top1.update(acc1[0], input.size(0))
-        top5.update(acc5[0], input.size(0))
+        acc1, acc5 = accuracy(output, target_src, topk=(1, 5))
+        losses.update(loss.item(), input_src.size(0))
+        top1.update(acc1[0], input_src.size(0))
+        top5.update(acc5[0], input_src.size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()

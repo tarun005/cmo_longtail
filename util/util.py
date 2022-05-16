@@ -10,6 +10,29 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
 from sklearn.utils.multiclass import unique_labels
+from collections import Counter
+
+class BalancedSampler(torch.utils.data.sampler.Sampler):
+    def __init__(self, dataset, indices=None, tgt_transform=None):
+
+        self.indices = list(range(len(dataset))) if indices is None else indices
+
+        class_ids = np.asarray(dataset.targets)[self.indices]
+        if tgt_transform is not None:
+            class_ids = list(map(tgt_transform, class_ids))
+
+        self.n_samples = len(class_ids)
+
+        # compute class frequencies and set them as sampling weights
+        counts = Counter(class_ids)
+        get_freq = lambda x: 1.0 / counts[x]
+        self.weights = torch.DoubleTensor(list(map(get_freq, class_ids)))
+
+    def __iter__(self):
+        return iter(torch.multinomial(self.weights, self.n_samples, replacement=True).tolist())
+
+    def __len__(self):
+        return self.n_samples
 
 
 class ImbalancedDatasetSampler(torch.utils.data.sampler.Sampler):
@@ -138,6 +161,10 @@ def save_checkpoint(args, state, is_best, epoch):
     if epoch % 20 == 0:
         filename = '%s/%s/%s_ckpt.pth.tar' % (args.root_model, args.store_name, str(epoch))
         torch.save(state, filename)
+
+def loop_iterable(iterable):
+    while True:
+        yield from iterable
 
 
 class AverageMeter(object):

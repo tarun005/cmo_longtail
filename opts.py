@@ -21,23 +21,29 @@ def str2bool(v):
 
 parser = argparse.ArgumentParser(description='PyTorch Cifar Training')
 parser.add_argument('--root', default='./data/', help='dataset setting')
-parser.add_argument('--dataset', default='cifar100', help='dataset setting', choices=('cifar100', 'Imagenet-LT', 'iNat18')
+parser.add_argument('--n_classes', type=int, default='100', help='number of classes')
+parser.add_argument('--store_name', default='test', help='number of classes')
+parser.add_argument('--dataset', default='cifar100', help='dataset setting', choices=('cifar100', 'Imagenet-LT', 'iNat18' , 'DomainNet')
 )
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet32')
 parser.add_argument('--num_classes', default=100, type=int, help='number of classes ')
-parser.add_argument('--imb_factor', default=0.01, type=float, help='imbalance factor')
+parser.add_argument('--imb_factor_src', default=0.01, type=float, help='imbalance factor source')
+parser.add_argument('--imb_factor_tgt', default=1., type=float, help='imbalance factor target')
 parser.add_argument('--rand_number', default=0, type=int, help='fix random number for data sampling')
 
 parser.add_argument('--loss_type', default="CE", type=str, help='loss type / method', choices=('CE', 'LDAM', 'BS'))
 parser.add_argument('--train_rule', default='None', type=str, help='data sampling strategy for train loader',
                     choices=('None', 'CBReweight', 'DRW'))
-parser.add_argument('--epochs', default=200, type=int, metavar='N',
+parser.add_argument('--epochs', default=50000, type=int, metavar='N',
+                    help='number of total epochs to run')
+parser.add_argument('--valid_freq', default=2500, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
                     metavar='LR', help='initial learning rate', dest='lr')
 parser.add_argument('--lr_steps', default=[120, 160], nargs='*', type=int,
                     help='learning rate schedule (when to drop lr by 10x)')
 parser.add_argument('--cos', action='store_true', help='use cosine LR')
+parser.add_argument('--CBS', action='store_true', help='use class balanced sampling')
 parser.add_argument('-b', '--batch_size', default=128, type=int,
                     metavar='N', help='mini-batch size')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
@@ -72,3 +78,7 @@ parser.add_argument('--gpu', default=None, type=int,
                     help='GPU id to use.')
 parser.add_argument('--root_log',type=str, default='log')
 parser.add_argument('--root_model', type=str, default='checkpoint')
+
+# adapation
+parser.add_argument('--source', required=True, help="source file path")
+parser.add_argument('--target', required=True, help="target file path")
