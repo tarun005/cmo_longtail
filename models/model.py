@@ -14,7 +14,7 @@ class predictor(nn.Module):
         return (activations)
 
 
-class Encoder(nn.Module):
+class Backbone(nn.Module):
     def __init__(self, arch, use_norm=False, bn_dim=256, total_classes=None):
         super(Encoder, self).__init__()
         self.model_fc = resnet.__dict__[arch](num_classes=total_classes, use_norm=use_norm)
@@ -92,3 +92,37 @@ class discriminatorCDAN(nn.Module):
         f2 = self.fc1(ad_in)
         f = self.fc2_3(f2)
         return f
+
+class inv_scheduler(object):
+
+    def __init__(self, optimizer, gamma, power):
+        super(inv_scheduler, self).__init__()
+        self.opt = optimizer
+        self.gamma = gamma
+        self.power = power
+        self.iteration = 1
+        self.lr = self.opt.param_groups[0]['lr']
+        self.weight_decay = self.opt.param_groups[0]['weight_decay']
+
+    def step(self):
+        lr = self.lr * (1 + self.gamma * self.iteration) ** (-self.power)
+        for param_group in self.opt.param_groups:
+            param_group['lr'] = lr * param_group['lr_mult']
+            param_group['weight_decay'] = self.weight_decay * param_group['decay_mult']
+        self.iteration += 1
+
+    def state_dict(self):
+        return {'lr': self.lr,
+            'weight_decay': self.weight_decay,
+            'iteration': self.iteration,
+            'gamma': self.gamma,
+            'power': self.power
+        }
+
+    def load_state_dict(self, state_dict):
+        self.lr = state_dict['lr']
+        self.weight_decay = state_dict['weight_decay']
+        self.iteration = state_dict['iteration']
+        self.gamma = state_dict['gamma']
+        self.power = state_dict['power']
+        self.step()

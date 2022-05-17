@@ -51,6 +51,8 @@ parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
 parser.add_argument('--wd', '--weight-decay', default=2e-4, type=float,
                     metavar='W', help='weight decay (default: 1e-4)',
                     dest='weight_decay')
+parser.add_argument('--gamma', default=0.001, type=float, help="inv scheduler gamma")
+parser.add_argument('--power', default=0.75, type=float, help="inv scheduler power")
 
 # data augmentation setting
 parser.add_argument('--data_aug', default="CMO", type=str, help='data augmentation type',

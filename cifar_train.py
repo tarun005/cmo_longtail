@@ -83,19 +83,22 @@ def main_worker(gpu, ngpus_per_node, args):
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
 
+    # scheduler = models.inv_scheduler(optimizer, gamma=args.gamma, power=args.power)
+
     # optionally resume from a checkpoint
     if args.resume:
         if os.path.isfile(args.resume):
             print("=> loading checkpoint '{}'".format(args.resume))
             checkpoint = torch.load(args.resume, map_location='cuda:0')
-            args.start_epoch = checkpoint['epoch']
+            args.start_epoch = checkpoint['iter']
             best_acc1 = checkpoint['best_acc1']
             if args.gpu is not None:
                 # best_acc1 may be from a checkpoint from a different GPU
                 best_acc1 = best_acc1.to(args.gpu)
             model.load_state_dict(checkpoint['state_dict'])
-            print("=> loaded checkpoint '{}' (epoch {})"
-                  .format(args.resume, checkpoint['epoch']))
+            # scheduler.load_state_dict(checkpoint['scheduler_dict'])
+            print("=> loaded checkpoint '{}' (iter {})"
+                  .format(args.resume, checkpoint['iter']))
         else:
             print("=> no checkpoint found at '{}'".format(args.resume))
 
@@ -197,6 +200,7 @@ def main_worker(gpu, ngpus_per_node, args):
     weighted_train_loader = None
     weighted_cls_num_list = [0] * num_classes
 
+
     train_loader_target = torch.utils.data.DataLoader(
             train_dataset_target, batch_size=args.batch_size, shuffle=True,
             num_workers=args.workers, pin_memory=True, sampler=None)
@@ -210,7 +214,9 @@ def main_worker(gpu, ngpus_per_node, args):
         weighted_train_loader = torch.utils.data.DataLoader(
             train_dataset_source, batch_size=args.batch_size,
             num_workers=args.workers, pin_memory=True, sampler=weighted_sampler)
+        inverse_iter = loop_iterable(weighted_train_loader)
 
+    batch_iterator = zip(loop_iterable(train_loader_source), loop_iterable(train_loader_target))
     cls_num_list_cuda = torch.from_numpy(np.array(cls_num_list)).float().cuda()
 
     # init log for training
@@ -224,12 +230,12 @@ def main_worker(gpu, ngpus_per_node, args):
     print("Training started!")
 
     is_best = 0
-    for epoch in range(args.start_epoch, args.epochs):
+    for iter in range(args.start_epoch, args.epochs):
 
         if args.use_randaug:
-            paco_adjust_learning_rate(optimizer, epoch, args)
+            paco_adjust_learning_rate(optimizer, iter, args)
         else:
-            adjust_learning_rate(optimizer, epoch, args)
+            adjust_learning_rate(optimizer, iter, args)
 
         if args.train_rule == 'None':
             train_sampler = None
@@ -243,7 +249,7 @@ def main_worker(gpu, ngpus_per_node, args):
             per_cls_weights = torch.FloatTensor(per_cls_weights).cuda(args.gpu)
         elif args.train_rule == 'DRW':
             train_sampler = None
-            idx = epoch // 160
+            idx = iter // 160
             betas = [0, 0.9999]
             effective_num = 1.0 - np.power(betas[idx], cls_num_list)
             per_cls_weights = (1.0 - betas[idx]) / np.array(effective_num)
@@ -263,32 +269,35 @@ def main_worker(gpu, ngpus_per_node, args):
             warnings.warn('Loss type is not listed')
             return
 
-        # train for one epoch
-        batch_iterator = zip(loop_iterable(train_loader_source), loop_iterable(train_loader_target))
-        train(batch_iterator, model, criterion, optimizer, epoch, args, log_training,
-              tf_writer, weighted_train_loader)
+        # train for one iter
+        # switch to train mode
+        model.train()
+        train(batch_iterator, model, criterion, optimizer, iter, args, log_training,
+              tf_writer, inverse_iter)
+        # scheduler.step()
 
         # evaluate on validation set
-        if (epoch + 1) % args.valid_freq == 0:
-            acc1_source = validate(val_loader_source, model, criterion, epoch, args, log_testing, tf_writer)
+        if (iter + 1) % args.valid_freq == 0:
+            acc1_source = validate(val_loader_source, model, criterion, iter, args, log_testing, tf_writer)
 
-            # acc1_target = validate(val_loader_target, model, criterion, epoch, args, log_testing, tf_writer)
+            # acc1_target = validate(val_loader_target, model, criterion, iter, args, log_testing, tf_writer)
 
             # remember best acc@1 and save checkpoint
             is_best = acc1_source > best_acc1
             best_acc1 = max(acc1_source, best_acc1)
 
-            tf_writer.add_scalar('acc/test_top1_best', best_acc1, epoch)
+            tf_writer.add_scalar('acc/test_top1_best', best_acc1, iter)
             output_best = 'Best Prec@1: %.3f\n' % (best_acc1)
             print(output_best)
             log_testing.write(output_best + '\n')
             log_testing.flush()
 
         save_checkpoint(args, {
-            'epoch': epoch + 1,
+            'iter': iter + 1,
             'state_dict': model.state_dict(),
             'best_acc1': best_acc1,
-        }, is_best, epoch + 1)
+            # 'scheduler_dict': scheduler.state_dict()
+        }, is_best, iter + 1)
 
     end_time = time.time()
 
@@ -304,89 +313,75 @@ def hms_string(sec_elapsed):
     return "{}:{:>02}:{:>05.2f}".format(h, m, s)
 
 
-def train(train_loader, model, criterion, optimizer, epoch, args, log,
-              tf_writer, weighted_train_loader=None):
-    batch_time = AverageMeter('Time', ':6.3f')
-    data_time = AverageMeter('Data', ':6.3f')
-    losses = AverageMeter('Loss', ':.4e')
-    top1 = AverageMeter('Acc@1', ':6.2f')
-    top5 = AverageMeter('Acc@5', ':6.2f')
+def train(train_loader, model, criterion, optimizer, iter, args, log,
+              tf_writer, inverse_iter=None):
+    # batch_time = AverageMeter('Time', ':6.3f')
+    # data_time = AverageMeter('Data', ':6.3f')
+    # losses = AverageMeter('Loss', ':.4e')
+    # top1 = AverageMeter('Acc@1', ':6.2f')
+    # top5 = AverageMeter('Acc@5', ':6.2f')
 
-    # switch to train mode
-    model.train()
 
     end = time.time()
-    if args.data_aug == 'CMO' and args.start_data_aug < epoch < (args.epochs - args.end_data_aug):
-        inverse_iter = iter(weighted_train_loader)
 
-    for i, (input_src, target_src, input_tgt, _) in enumerate(train_loader):
-        if args.data_aug == 'CMO' and args.start_data_aug < epoch < (args.epochs - args.end_data_aug):
-            try:
-                input2, target2 = next(inverse_iter)
-            except:
-                inverse_iter = iter(weighted_train_loader)
-                input2, target2 = next(inverse_iter)
-            input2 = input2[:input_src.size()[0]]
-            target2 = target2[:target_src.size()[0]]
-            input2 = input2.cuda(args.gpu, non_blocking=True)
-            target2 = target2.cuda(args.gpu, non_blocking=True)
+    input_src, target_src, input_tgt, _ = next(train_loader)
+    if args.data_aug == 'CMO' and args.start_data_aug < iter < (args.epochs - args.end_data_aug):
+        input2, target2 = next(inverse_iter)
+        input2 = input2[:input_src.size()[0]]
+        target2 = target2[:target_src.size()[0]]
+        input2 = input2.cuda(args.gpu, non_blocking=True)
+        target2 = target2.cuda(args.gpu, non_blocking=True)
 
-        # measure data loading time
-        data_time.update(time.time() - end)
+    # measure data loading time
+    # data_time.update(time.time() - end)
 
-        input_src = input_src.cuda(args.gpu, non_blocking=True)
-        target_src = target_src.cuda(args.gpu, non_blocking=True)
-        input_tgt = input_tgt.cuda(args.gpu, non_blocking=True)
-        # Data augmentation
-        r = np.random.rand(1)
+    input_src = input_src.cuda(args.gpu, non_blocking=True)
+    target_src = target_src.cuda(args.gpu, non_blocking=True)
+    input_tgt = input_tgt.cuda(args.gpu, non_blocking=True)
+    # Data augmentation
+    r = np.random.rand(1)
 
-        if args.data_aug == 'CMO' and args.start_data_aug < epoch < (args.epochs - args.end_data_aug) and r < args.mixup_prob:
-            # generate mixed sample
-            lam = np.random.beta(1, 1)
-            bbx1, bby1, bbx2, bby2 = rand_bbox(input_src.size(), lam)
-            input_src[:, :, bbx1:bbx2, bby1:bby2] = input2[:, :, bbx1:bbx2, bby1:bby2]
-            # adjust lambda to exactly match pixel ratio
-            lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (input_src.size()[-1] * input_src.size()[-2]))
-            # compute output
-            output = model(input_src)
-            loss = criterion(output, target_src) * lam + criterion(output, target2) * (1. - lam)
+    if args.data_aug == 'CMO' and args.start_data_aug < iter < (args.epochs - args.end_data_aug) and r < args.mixup_prob:
+        # generate mixed sample
+        lam = np.random.beta(1, 1)
+        bbx1, bby1, bbx2, bby2 = rand_bbox(input_src.size(), lam)
+        input_src[:, :, bbx1:bbx2, bby1:bby2] = input2[:, :, bbx1:bbx2, bby1:bby2]
+        # adjust lambda to exactly match pixel ratio
+        lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (input_src.size()[-1] * input_src.size()[-2]))
+        # compute output
+        output = model(input_src)
+        loss = criterion(output, target_src) * lam + criterion(output, target2) * (1. - lam)
 
-        else:
-            output = model(input_src)
-            loss = criterion(output, target_src)
+    else:
+        output = model(input_src)
+        loss = criterion(output, target_src)
 
-        # measure accuracy and record loss
-        acc1, acc5 = accuracy(output, target_src, topk=(1, 5))
-        losses.update(loss.item(), input_src.size(0))
-        top1.update(acc1[0], input_src.size(0))
-        top5.update(acc5[0], input_src.size(0))
+    # measure accuracy and record loss
+    # acc1, acc5 = accuracy(output, target_src, topk=(1, 5))
+    # losses.update(loss.item(), input_src.size(0))
+    # top1.update(acc1[0], input_src.size(0))
+    # top5.update(acc5[0], input_src.size(0))
 
-        # compute gradient and do SGD step
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+    # compute gradient and do SGD step
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
 
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-        end = time.time()
+    # measure elapsed time
+    # batch_time.update(time.time() - end)
+    # end = time.time()
 
-        if i % args.print_freq == 0:
-            output = ('Epoch: [{0}][{1}/{2}], lr: {lr:.5f}\t'
-                      'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                      'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
-                      'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                      'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
-                      'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-                epoch, i, len(train_loader), batch_time=batch_time,
-                data_time=data_time, loss=losses, top1=top1, top5=top5, lr=optimizer.param_groups[-1]['lr']))  # TODO
-            print(output)
-            log.write(output + '\n')
-            log.flush()
+    if iter % args.print_freq == 0:
+        output = ('iter: [{0}/{1}], lr: {lr:.5f}\t'.format(
+            iter, args.epochs, lr=optimizer.param_groups[-1]['lr']))  # TODO
+        print(output)
+        log.write(output + '\n')
+        log.flush()
 
-    tf_writer.add_scalar('loss/train', losses.avg, epoch)
-    tf_writer.add_scalar('acc/train_top1', top1.avg, epoch)
-    tf_writer.add_scalar('acc/train_top5', top5.avg, epoch)
-    tf_writer.add_scalar('lr', optimizer.param_groups[-1]['lr'], epoch)
+    tf_writer.add_scalar('loss/train', loss.item(), iter)
+    # tf_writer.add_scalar('acc/train_top1', top1.avg, iter)
+    # tf_writer.add_scalar('acc/train_top5', top5.avg, iter)
+    tf_writer.add_scalar('lr', optimizer.param_groups[-1]['lr'], iter)
 
 
 def rand_bbox(size, lam):
@@ -423,7 +418,7 @@ def rand_bbox_withcenter(size, lam, cx, cy):
     return bbx1, bby1, bbx2, bby2
 
 
-def validate(val_loader, model, criterion, epoch, args, log=None, tf_writer=None, flag='val'):
+def validate(val_loader, model, criterion, iter, args, log=None, tf_writer=None, flag='val'):
     batch_time = AverageMeter('Time', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
@@ -490,37 +485,37 @@ def validate(val_loader, model, criterion, epoch, args, log=None, tf_writer=None
             log.write(out_cls_acc + '\n')
             log.flush()
 
-        tf_writer.add_scalar('loss/test_' + flag, losses.avg, epoch)
-        tf_writer.add_scalar('acc/test_' + flag + '_top1', top1.avg, epoch)
-        tf_writer.add_scalar('acc/test_' + flag + '_top5', top5.avg, epoch)
-        tf_writer.add_scalars('acc/test_' + flag + '_cls_acc', {str(i): x for i, x in enumerate(cls_acc)}, epoch)
+        tf_writer.add_scalar('loss/test_' + flag, losses.avg, iter)
+        tf_writer.add_scalar('acc/test_' + flag + '_top1', top1.avg, iter)
+        tf_writer.add_scalar('acc/test_' + flag + '_top5', top5.avg, iter)
+        tf_writer.add_scalars('acc/test_' + flag + '_cls_acc', {str(i): x for i, x in enumerate(cls_acc)}, iter)
 
     return top1.avg
 
 
-def adjust_learning_rate(optimizer, epoch, args):
+def adjust_learning_rate(optimizer, iter, args):
     """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-    epoch = epoch + 1
-    if epoch <= 5:
-        lr = args.lr * epoch / 5
-    elif epoch > 180:
+    iter = iter + 1
+    if iter <= 100:
+        lr = args.lr #* iter / 100
+    elif iter > args.epochs*.9:
         lr = args.lr * 0.0001
-    elif epoch > 160:
+    elif iter > args.epochs*.8:
         lr = args.lr * 0.01
     else:
         lr = args.lr
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-def paco_adjust_learning_rate(optimizer, epoch, args):
+def paco_adjust_learning_rate(optimizer, iter, args):
     # experiments as PaCo (ICCV'21) setting.
-    warmup_epochs = 10
+    warmup_epochs = 1000
     """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-    if epoch <= warmup_epochs:
-        lr = args.lr / warmup_epochs * (epoch + 1)
-    elif epoch > 360:
+    if iter <= warmup_epochs:
+        lr = args.lr #/ warmup_epochs * (iter + 1)
+    elif iter > args.epochs*.9:
         lr = args.lr * 0.01
-    elif epoch > 320:
+    elif iter > args.epochs*.8:
         lr = args.lr * 0.1
     else:
         lr = args.lr
