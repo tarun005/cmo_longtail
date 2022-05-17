@@ -65,7 +65,7 @@ def main_worker(gpu, ngpus_per_node, args):
     print("=> creating model '{}'".format(args.arch))
     num_classes = args.num_classes
     use_norm = True if args.loss_type == 'LDAM' else False
-    model = models.__dict__[args.arch](num_classes=num_classes, use_norm=use_norm)
+    model = models.Backbone(args.arch, use_norm, args.bn_dim, args.n_classes)
     # print(model)
 
     if args.gpu is not None:
@@ -75,7 +75,11 @@ def main_worker(gpu, ngpus_per_node, args):
         # DataParallel will divide and allocate batch_size to all available GPUs
         model = torch.nn.DataParallel(model).cuda()
 
-    optimizer = torch.optim.SGD(model.parameters(), args.lr,
+    params = [{"params":model.model_fc.parameters() , "lr_mult":1, "decay_mult":2}] + \
+             [{"params":model.bottleneck_layer.parameters(), "lr_mult":0.1, "decay_mult":2}] + \
+             [{"params":model.classifier_layer.parameters(), "lr_mult":0.1, "decay_mult":2}] 
+
+    optimizer = torch.optim.SGD(params, args.lr,
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
 

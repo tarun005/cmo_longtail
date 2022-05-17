@@ -25,7 +25,7 @@ parser.add_argument('--n_classes', type=int, default='100', help='number of clas
 parser.add_argument('--store_name', default='test', help='number of classes')
 parser.add_argument('--dataset', default='cifar100', help='dataset setting', choices=('cifar100', 'Imagenet-LT', 'iNat18' , 'DomainNet')
 )
-parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet32')
+parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50')
 parser.add_argument('--num_classes', default=100, type=int, help='number of classes ')
 parser.add_argument('--imb_factor_src', default=0.01, type=float, help='imbalance factor source')
 parser.add_argument('--imb_factor_tgt', default=1., type=float, help='imbalance factor target')
@@ -56,8 +56,8 @@ parser.add_argument('--wd', '--weight-decay', default=2e-4, type=float,
 parser.add_argument('--data_aug', default="CMO", type=str, help='data augmentation type',
                     choices=('vanilla', 'CMO'))
 parser.add_argument('--mixup_prob', default=0.5, type=float, help='mixup probability')
-parser.add_argument('--start_data_aug', default=3, type=int, help='start epoch for aug')
-parser.add_argument('--end_data_aug', default=3, type=int, help='how many epochs to turn off aug')
+parser.add_argument('--start_data_aug', default=1000, type=int, help='start epoch for aug')
+parser.add_argument('--end_data_aug', default=1000, type=int, help='how many epochs to turn off aug')
 parser.add_argument('--weighted_alpha', default=1, type=float, help='weighted alpha for sampling probability (q(1,k))')
 
 parser.add_argument('--use_randaug', action='store_true')
